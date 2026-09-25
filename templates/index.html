@@ -196,6 +196,59 @@
         </table>
       </div>
     </section>
+
+    <section class="preview-section" id="layout-section">
+      <h2>多尺码对称花样排针</h2>
+      <p class="hint">
+        输入每10厘米针数、按从小到大排列的各尺码目标片幅、单侧边针数、中央针数、
+        花样宽度与允许宽差。每侧使用相同且至少一次的完整花样重复：
+        起针数 = 2×边针 + 中央针 + 2×花样宽度×单侧重复数，
+        实际片幅 = 起针数 × 10 ÷ 每10厘米针数。计算会为全部尺码选择严格递增的
+        单侧重复数，使各尺码实际片幅与目标差不超过允许宽差，并让宽差绝对值之和
+        最小（同分取按尺码顺序字典序最小的重复数组）；无可行组合时会说明无法
+        同时满足约束，并列出各尺码在允许宽差内的可行重复数范围。
+      </p>
+      <form id="layout-form">
+        <div class="layout-grid">
+          <label class="layout-item">
+            <span>每10厘米针数</span>
+            <input type="number" id="layout-gauge" min="0" step="0.1" value="22" required>
+          </label>
+          <label class="layout-item">
+            <span>单侧边针数</span>
+            <input type="number" id="layout-edge" min="0" step="1" value="2" required>
+          </label>
+          <label class="layout-item">
+            <span>中央针数</span>
+            <input type="number" id="layout-center" min="0" step="1" value="6" required>
+          </label>
+          <label class="layout-item">
+            <span>花样宽度（针）</span>
+            <input type="number" id="layout-pattern-width" min="1" step="1" value="8" required>
+          </label>
+          <label class="layout-item">
+            <span>允许宽差（厘米）</span>
+            <input type="number" id="layout-tolerance" min="0" step="0.1" value="1" required>
+          </label>
+        </div>
+
+        <div class="field">
+          <span>各尺码目标片幅（厘米，按从小到大排列）</span>
+          <div id="layout-sizes-list"></div>
+          <button type="button" id="layout-add-size" class="small">＋ 添加尺码</button>
+        </div>
+
+        <div class="actions">
+          <button type="submit">计算排针</button>
+          <button type="button" id="layout-fill-example">填入示例</button>
+        </div>
+      </form>
+      <div id="layout-message" class="move-message" hidden></div>
+      <section id="layout-result" hidden>
+        <div id="layout-meta" class="preview-meta"></div>
+        <div id="layout-table-wrap"></div>
+      </section>
+    </section>
   </main>
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>

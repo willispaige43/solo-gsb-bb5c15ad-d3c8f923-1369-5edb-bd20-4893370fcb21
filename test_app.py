@@ -1022,5 +1022,136 @@ class TestTrackStitchApi(unittest.TestCase):
         self.assertEqual(data['final_needle'], 1999999999)
 
 
+class TestPatternLayoutApi(unittest.TestCase):
+    PAYLOAD = {
+        'gauge': 22,
+        'sizes': [{'name': 'S', 'target': 41},
+                  {'name': 'M', 'target': 48},
+                  {'name': 'L', 'target': 55}],
+        'edge': 2,
+        'center': 6,
+        'pattern_width': 8,
+        'tolerance': 1,
+    }
+
+    def setUp(self):
+        self.client = app.test_client()
+
+    def post(self, **overrides):
+        payload = dict(self.PAYLOAD)
+        payload.update(overrides)
+        return self.client.post('/api/pattern-layout', json=payload).get_json()
+
+    def test_basic_layout(self):
+        data = self.post()
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['base'], 10)   # 2×边针 + 中央针
+        self.assertEqual(data['step'], 16)   # 2×花样宽度
+        self.assertEqual([s['repeats'] for s in data['sizes']], [5, 6, 7])
+        self.assertEqual([s['cast_on'] for s in data['sizes']], [90, 106, 122])
+        # 实际片幅 = 起针数 × 10 ÷ 每10厘米针数
+        self.assertAlmostEqual(data['sizes'][0]['width'], 90 * 10 / 22, places=2)
+        self.assertAlmostEqual(data['sizes'][2]['width'], 122 * 10 / 22, places=2)
+        # 各尺码偏差不超过允许宽差，总宽差为偏差之和（精确分数 8/11）
+        for s in data['sizes']:
+            self.assertLessEqual(s['deviation'], 1 + 1e-9)
+            self.assertAlmostEqual(s['deviation'],
+                                   abs(s['width'] - s['target']), places=1)
+        self.assertAlmostEqual(data['total_deviation'], 8 / 11, places=2)
+
+    def test_tie_breaks_to_lexicographically_smallest(self):
+        # (2,4) 与 (3,4) 总宽差同为 9，应取字典序最小的 (2,4)
+        data = self.post(gauge=10, edge=0, center=0, pattern_width=5,
+                         tolerance=10,
+                         sizes=[{'name': 'A', 'target': 25},
+                                {'name': 'B', 'target': 36}])
+        self.assertTrue(data['ok'])
+        self.assertEqual([s['repeats'] for s in data['sizes']], [2, 4])
+        self.assertEqual(data['total_deviation'], 9)
+
+    def test_infeasible_chain_reports_ranges(self):
+        # 尺码1 只能取 2、尺码2 只能取 2~3、尺码3 只能取 3：严格递增不可行
+        data = self.post(gauge=10, edge=0, center=0, pattern_width=5,
+                         tolerance=5,
+                         sizes=[{'name': 'S', 'target': 20},
+                                {'name': 'M', 'target': 25},
+                                {'name': 'L', 'target': 30}])
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'infeasible')
+        self.assertIn('无法同时满足约束', data['error']['message'])
+        self.assertEqual(data['fail_index'], 2)
+        ranges = [(s['min_repeats'], s['max_repeats']) for s in data['sizes']]
+        self.assertEqual(ranges, [(2, 2), (2, 3), (3, 3)])
+
+    def test_infeasible_empty_range(self):
+        # 允许宽差太小，唯一尺码没有任何可行重复数
+        data = self.post(gauge=10, edge=0, center=0, pattern_width=5,
+                         tolerance=1, sizes=[{'name': 'S', 'target': 25}])
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'infeasible')
+        self.assertIn('无法同时满足约束', data['error']['message'])
+        s = data['sizes'][0]
+        self.assertGreater(s['min_repeats'], s['max_repeats'])
+
+    def test_repeats_at_least_one(self):
+        data = self.post(gauge=10, edge=0, center=0, pattern_width=5,
+                         tolerance=20, sizes=[{'name': 'S', 'target': 2}])
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['sizes'][0]['repeats'], 1)
+
+    def test_string_numbers_accepted(self):
+        data = self.post(gauge='22', edge='2', center='6',
+                         pattern_width='8', tolerance='1',
+                         sizes=[{'name': 'S', 'target': '41'}])
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['sizes'][0]['repeats'], 5)
+
+    def test_bad_scalar_params(self):
+        cases = [
+            ('gauge', [0, -1, 'x', True, None, '1e2']),
+            ('edge', [-1, 'x', True, None, 1.5]),
+            ('center', [-1, 'x', True, None, 1.5]),
+            ('pattern_width', [0, -1, 'x', True, None, 1.5]),
+            ('tolerance', [-1, 'x', True, None]),
+        ]
+        for field, bad_values in cases:
+            for bad in bad_values:
+                data = self.post(**{field: bad})
+                self.assertFalse(data['ok'], msg='{}={!r}'.format(field, bad))
+                self.assertEqual(data['error']['type'], 'params',
+                                 msg='{}={!r}'.format(field, bad))
+
+    def test_bad_sizes_rejected(self):
+        for bad in [None, [],
+                    [{'name': '', 'target': 40}],
+                    [{'name': 'S', 'target': 0}],
+                    [{'name': 'S', 'target': -3}],
+                    [{'name': 'S', 'target': 'x'}],
+                    [{'name': 'S'}],
+                    ['S']]:
+            data = self.post(sizes=bad)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'sizes', msg=repr(bad))
+
+    def test_targets_must_be_ascending(self):
+        data = self.post(sizes=[{'name': 'S', 'target': 50},
+                                {'name': 'M', 'target': 40}])
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'sizes')
+        self.assertIn('从小到大', data['error']['message'])
+
+    def test_equal_targets_allowed(self):
+        # 目标片幅相同（不减）合法，重复数仍须严格递增
+        data = self.post(gauge=10, edge=0, center=0, pattern_width=5,
+                         tolerance=10,
+                         sizes=[{'name': 'A', 'target': 20},
+                                {'name': 'B', 'target': 20}])
+        self.assertTrue(data['ok'])
+        repeats = [s['repeats'] for s in data['sizes']]
+        # (1,2) 与 (2,3) 总宽差同为 10，取字典序最小的 (1,2)
+        self.assertEqual(repeats, [1, 2])
+        self.assertLess(repeats[0], repeats[1])
+
+
 if __name__ == '__main__':
     unittest.main()

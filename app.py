@@ -71,6 +71,30 @@ POST /api/track-stitch   跨行针位追踪（不展开重复项）
          |"parse"|"count", ...}, "tracks"?: [...]}
     needle 超出所选尺码起针数时 type 为 "needle"（在解析任何行之前报错）。
 
+POST /api/pattern-layout  多尺码对称花样排针
+  请求: {"gauge": 22, "sizes": [{"name": "S", "target": 41}, ...],
+         "edge": 2, "center": 6, "pattern_width": 8, "tolerance": 1}
+    gauge 为每10厘米针数（正数）；sizes 按目标片幅（厘米，正数）从小到大
+    排列；edge 为单侧边针数、center 为中央针数（非负整数）；
+    pattern_width 为花样宽度（正整数，针）；tolerance 为允许宽差
+    （厘米，非负）。每侧使用相同且至少一次的完整花样重复：
+    起针数 = 2×边针 + 中央针 + 2×花样宽度×单侧重复数，
+    实际片幅 = 起针数 × 10 ÷ 每10厘米针数。
+  成功: {"ok": true, "base", "step", "total_deviation",
+         "sizes": [{"index", "name", "target", "repeats", "cast_on",
+                    "width", "deviation"}, ...]}
+    为全部尺码选择严格递增的单侧重复数（repeats ≥ 1），各尺码实际片幅
+    与目标差不超过允许宽差；在可行组合中最小化宽差绝对值之和
+    （total_deviation），同分取按尺码顺序字典序最小的重复数组。
+    寻优全程用分数精确计算，width/deviation/total_deviation 保留两位小数。
+  无可行组合: {"ok": false, "error": {"type": "infeasible", "message"},
+               "base", "step", "fail_index",
+               "sizes": [{"index", "name", "target",
+                          "min_repeats", "max_repeats"}, ...]}
+    message 说明无法同时满足约束；sizes 给出各尺码在允许宽差内的可行
+    重复数范围（min_repeats > max_repeats 表示该尺码单独即无可行重复）。
+  参数非法: {"ok": false, "error": {"type": "params"|"sizes", "message"}}
+
 逐行推算规则：每个尺码独立地以上一行的产出作为下一行的可用针数；某尺码
 消耗与可用针数不一致（不足或超出）时，仅该尺码停止并记录行号与差额，
 其余尺码继续推算。指令本身无法解析（含 *{a|b} 项数与尺码数不符、倍数
@@ -94,9 +118,12 @@ final 为最后一行有效推算后的针数（全部通过时即最终针数�
 import math
 import os
 import re
+from decimal import Decimal
+from fractions import Fraction
 
 from flask import Flask, jsonify, render_template, request
 
+from pattern_layout import solve_layout
 from stitch_parser import (
     STITCH_NAMES,
     ParseError,
@@ -207,6 +234,85 @@ def _parse_yarn(raw):
         return None, err
     yarn['grams_per_ball'] = value
     return yarn, None
+
+
+def _parse_fraction(raw, label, positive=False):
+    """解析非负（positive=True 时必须严格为正）数值为精确分数。
+
+    接受数字或纯数字字符串，拒绝布尔值、指数记法与无法解析的内容。
+    十进制输入按字面经 Decimal 转为 Fraction，宽差比较全程不用浮点。
+    """
+    if isinstance(raw, bool):
+        return None, "{}必须为数值".format(label)
+    if isinstance(raw, int):
+        value = Fraction(raw)
+    elif isinstance(raw, float):
+        if not math.isfinite(raw):
+            return None, "{}必须为数值".format(label)
+        value = Fraction(Decimal(str(raw)))
+    elif isinstance(raw, str) and _NUMBER_RE.match(raw.strip()):
+        value = Fraction(Decimal(raw.strip()))
+    else:
+        return None, "{}必须为数值".format(label)
+    if value < 0:
+        return None, "{}不能为负数".format(label)
+    if positive and value <= 0:
+        return None, "{}必须大于 0".format(label)
+    return value, None
+
+
+def _parse_nonneg_int(raw, label, positive=False):
+    """校验非负整数（positive=True 时必须为正整数），返回 (数值, 错误消息)。"""
+    if isinstance(raw, bool):  # bool 是 int 的子类，需先排除
+        return None, "{}必须为整数".format(label)
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str):
+        s = raw.strip()
+        if not s.isdigit():
+            return None, "{}必须为整数".format(label)
+        value = int(s)
+    else:
+        return None, "{}必须为整数".format(label)
+    if value < 0:
+        return None, "{}不能为负数".format(label)
+    if positive and value <= 0:
+        return None, "{}必须大于 0".format(label)
+    return value, None
+
+
+def _parse_layout_sizes(raw):
+    """校验排针尺码列表，返回 ([{"name", "target"}], 错误消息)。
+
+    每个尺码为 {"name", "target"}：target 为目标片幅（厘米，正数，精确
+    分数）；各尺码目标片幅必须按从小到大排列（单调不减）。
+    """
+    if not isinstance(raw, list) or not raw:
+        return None, "尺码列表不能为空"
+    sizes = []
+    for idx, item in enumerate(raw, 1):
+        if not isinstance(item, dict):
+            return None, "第 {} 个尺码格式错误，应为 {{\"name\", \"target\"}}".format(idx)
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return None, "第 {} 个尺码的名称不能为空".format(idx)
+        target, err = _parse_fraction(
+            item.get("target"),
+            "尺码 {} 的目标片幅".format(name.strip()), positive=True)
+        if err:
+            return None, err
+        sizes.append({"name": name.strip(), "target": target})
+    for i in range(1, len(sizes)):
+        if sizes[i]["target"] < sizes[i - 1]["target"]:
+            return None, "各尺码目标片幅需按从小到大排列：{}（{}）小于 {}（{}）".format(
+                sizes[i]["name"], sizes[i]["target"],
+                sizes[i - 1]["name"], sizes[i - 1]["target"])
+    return sizes, None
+
+
+def _cm(frac):
+    """精确分数转厘米显示值（保留两位小数）。"""
+    return round(float(frac), 2)
 
 
 def _parse_error_obj(lineno, text, exc):
@@ -708,6 +814,93 @@ def track_stitch():
     if error is None:
         result["final_needle"] = current
     return jsonify(result)
+
+
+@app.post("/api/pattern-layout")
+def pattern_layout():
+    """多尺码对称花样排针：为全部尺码选择严格递增的单侧花样重复数。
+
+    每侧使用相同且至少一次的完整花样重复：
+      起针数 = 2×边针 + 中央针 + 2×花样宽度×单侧重复数
+      实际片幅 = 起针数 × 10 ÷ 每10厘米针数
+    各尺码实际片幅与目标片幅之差不得超过允许宽差；在可行组合中最小化
+    宽差绝对值之和，同分取按尺码顺序字典序最小的重复数组。求解由
+    pattern_layout.solve_layout 完成，全程分数精确计算。
+    """
+    data = request.get_json(silent=True) or {}
+
+    gauge, err = _parse_fraction(data.get("gauge"), "每10厘米针数", positive=True)
+    if err:
+        return jsonify({"ok": False, "error": {"type": "params", "message": err}})
+
+    edge, err = _parse_nonneg_int(data.get("edge"), "单侧边针数")
+    if err:
+        return jsonify({"ok": False, "error": {"type": "params", "message": err}})
+
+    center, err = _parse_nonneg_int(data.get("center"), "中央针数")
+    if err:
+        return jsonify({"ok": False, "error": {"type": "params", "message": err}})
+
+    pattern_width, err = _parse_nonneg_int(
+        data.get("pattern_width"), "花样宽度", positive=True)
+    if err:
+        return jsonify({"ok": False, "error": {"type": "params", "message": err}})
+
+    tolerance, err = _parse_fraction(data.get("tolerance"), "允许宽差")
+    if err:
+        return jsonify({"ok": False, "error": {"type": "params", "message": err}})
+
+    sizes, err = _parse_layout_sizes(data.get("sizes"))
+    if err:
+        return jsonify({"ok": False, "error": {"type": "sizes", "message": err}})
+
+    result = solve_layout(
+        gauge, [s["target"] for s in sizes],
+        edge, center, pattern_width, tolerance)
+
+    if not result["ok"]:
+        fail = result["fail_index"]
+        lo, hi = result["ranges"][fail]
+        if lo > hi:
+            message = (
+                "无法同时满足约束：尺码 {} 在允许宽差内没有任何可行的单侧重复数"
+                "（任何不小于 1 的重复数换算的片幅都超出允许宽差）".format(
+                    sizes[fail]["name"]))
+        else:
+            message = (
+                "无法同时满足约束：尺码 {} 在允许宽差内单侧重复数只能取 {}~{}，"
+                "但为满足各尺码严格递增，它至少需要取 {}".format(
+                    sizes[fail]["name"], lo, hi, result["fail_need"]))
+        return jsonify({
+            "ok": False,
+            "error": {"type": "infeasible", "message": message},
+            "base": result["base"],
+            "step": result["step"],
+            "fail_index": fail,
+            "sizes": [{
+                "index": i,
+                "name": s["name"],
+                "target": _cm(s["target"]),
+                "min_repeats": result["ranges"][i][0],
+                "max_repeats": result["ranges"][i][1],
+            } for i, s in enumerate(sizes)],
+        })
+
+    return jsonify({
+        "ok": True,
+        "base": result["base"],
+        "step": result["step"],
+        "total_deviation": _cm(result["total_deviation"]),
+        "sizes": [{
+            "index": i,
+            "name": sizes[i]["name"],
+            "target": _cm(sizes[i]["target"]),
+            "repeats": s["repeats"],
+            "cast_on": s["cast_on"],
+            "width": _cm(s["width"]),
+            "deviation": _cm(s["deviation"]),
+        } for i, s in enumerate(result["sizes"])],
+    })
 
 
 def _yarn_summary(yarn, state):
