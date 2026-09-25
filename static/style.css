@@ -475,3 +475,42 @@ button.small {
   width: 160px;
   max-width: none;
 }
+
+/* 多尺码对称花样排针 */
+.layout-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px 16px;
+  margin-bottom: 14px;
+}
+
+.layout-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.layout-item span {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.layout-item input[type="number"] {
+  width: 100%;
+  max-width: none;
+}
+
+#layout-sizes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+#layout-sizes-list .layout-target {
+  width: 140px;
+}
+
+#layout-result {
+  margin-top: 10px;
+}

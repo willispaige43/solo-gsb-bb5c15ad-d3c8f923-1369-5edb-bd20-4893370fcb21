@@ -1022,5 +1022,140 @@ class TestTrackStitchApi(unittest.TestCase):
         self.assertEqual(data['final_needle'], 1999999999)
 
 
+class TestPatternLayoutApi(unittest.TestCase):
+    def setUp(self):
+        self.client = app.test_client()
+
+    def post(self, **overrides):
+        payload = {
+            'gauge': 20,
+            'sizes': [{'name': 'S', 'target': 27},
+                      {'name': 'M', 'target': 33},
+                      {'name': 'L', 'target': 39}],
+            'edge': 1,
+            'center': 4,
+            'pattern_width': 6,
+            'tolerance': 1,
+        }
+        payload.update(overrides)
+        return self.client.post('/api/pattern-layout', json=payload).get_json()
+
+    def test_exact_solution(self):
+        # width(r) = 3+6r：目标 27/33/39 恰好对应 r = 4/5/6
+        data = self.post()
+        self.assertTrue(data['ok'])
+        self.assertEqual([s['repeats'] for s in data['sizes']], [4, 5, 6])
+        self.assertEqual([s['cast_on'] for s in data['sizes']], [54, 66, 78])
+        self.assertEqual([s['width'] for s in data['sizes']], [27, 33, 39])
+        self.assertEqual([s['deviation'] for s in data['sizes']], [0, 0, 0])
+        self.assertEqual(data['total_deviation'], 0)
+        # 回显排针参数
+        self.assertEqual(data['gauge'], 20)
+        self.assertEqual(data['edge'], 1)
+        self.assertEqual(data['center'], 4)
+        self.assertEqual(data['pattern_width'], 6)
+        self.assertEqual(data['tolerance'], 1)
+
+    def test_deviation_minimized_and_reported(self):
+        data = self.post(sizes=[{'name': 'S', 'target': 26.5},
+                                {'name': 'M', 'target': 33},
+                                {'name': 'L', 'target': 38.5}])
+        self.assertTrue(data['ok'])
+        self.assertEqual([s['repeats'] for s in data['sizes']], [4, 5, 6])
+        self.assertEqual([s['deviation'] for s in data['sizes']],
+                         [0.5, 0, 0.5])
+        self.assertEqual(data['total_deviation'], 1)
+
+    def test_lexicographic_tie_break(self):
+        # 四个可行组合总偏差同为 2，取字典序最小的 [2, 4]
+        data = self.post(sizes=[{'name': 'S', 'target': 5},
+                                {'name': 'M', 'target': 9}],
+                         edge=0, center=0, pattern_width=2, tolerance=2.5)
+        self.assertTrue(data['ok'])
+        self.assertEqual([s['repeats'] for s in data['sizes']], [2, 4])
+        self.assertEqual(data['total_deviation'], 2)
+
+    def test_infeasible_empty_reports_size(self):
+        # width(r) = 3+6r 总是整数，目标 27.6±0.1 无解
+        data = self.post(sizes=[{'name': 'S', 'target': 27.6}], tolerance=0.1)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'infeasible')
+        self.assertIn('无法同时满足约束', data['error']['message'])
+        self.assertIn('S', data['error']['message'])
+        self.assertIsNone(data['sizes'][0]['min_repeats'])
+        self.assertIsNone(data['sizes'][0]['max_repeats'])
+
+    def test_infeasible_increasing_reports_range(self):
+        # 两尺码目标都是 4、宽差 0.6：各自只能 r=2，无法严格递增
+        data = self.post(sizes=[{'name': 'S', 'target': 4},
+                                {'name': 'M', 'target': 4}],
+                         edge=0, center=0, pattern_width=2, tolerance=0.6)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'infeasible')
+        self.assertIn('无法同时满足约束', data['error']['message'])
+        self.assertIn('严格递增', data['error']['message'])
+        self.assertEqual(data['sizes'][0]['min_repeats'], 2)
+        self.assertEqual(data['sizes'][0]['max_repeats'], 2)
+
+    def test_bad_gauge(self):
+        for bad in [0, -1, 'x', None, True]:
+            data = self.post(gauge=bad)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'gauge', msg=repr(bad))
+
+    def test_bad_sizes(self):
+        for bad in [None, [], 'S', [{}], [{'name': '', 'target': 30}],
+                    [{'name': 'S'}], [{'name': 'S', 'target': 0}],
+                    [{'name': 'S', 'target': -3}],
+                    [{'name': 'S', 'target': 'x'}],
+                    [{'name': 'S', 'target': True}]]:
+            data = self.post(sizes=bad)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'sizes', msg=repr(bad))
+
+    def test_unsorted_targets_rejected(self):
+        data = self.post(sizes=[{'name': 'M', 'target': 33},
+                                {'name': 'S', 'target': 27}])
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'sizes')
+        self.assertIn('从小到大', data['error']['message'])
+
+    def test_bad_integer_fields(self):
+        for field in ['edge', 'center']:
+            for bad in [-1, 1.5, 'x', None, True]:
+                data = self.post(**{field: bad})
+                self.assertFalse(data['ok'], msg=(field, bad))
+                self.assertEqual(data['error']['type'], field,
+                                 msg=(field, bad))
+        for bad in [0, -1, 1.5, 'x', None, True]:
+            data = self.post(pattern_width=bad)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'pattern_width',
+                             msg=repr(bad))
+
+    def test_bad_tolerance(self):
+        for bad in [-1, 'x', None, True]:
+            data = self.post(tolerance=bad)
+            self.assertFalse(data['ok'], msg=repr(bad))
+            self.assertEqual(data['error']['type'], 'tolerance', msg=repr(bad))
+
+    def test_zero_tolerance_and_zero_edge_center_allowed(self):
+        # 允许宽差 0（精确匹配）、边针/中央针为 0 均合法
+        data = self.post(sizes=[{'name': 'S', 'target': 4}],
+                         edge=0, center=0, pattern_width=2, tolerance=0)
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['sizes'][0]['repeats'], 2)
+        self.assertEqual(data['sizes'][0]['cast_on'], 8)
+        self.assertEqual(data['sizes'][0]['width'], 4)
+
+    def test_numeric_strings_accepted(self):
+        data = self.post(gauge='20', tolerance='1',
+                         sizes=[{'name': 'S', 'target': '27'}],
+                         edge='1', center='4', pattern_width='6')
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['sizes'][0]['repeats'], 4)
+        self.assertEqual(data['sizes'][0]['cast_on'], 54)
+
+
 if __name__ == '__main__':
     unittest.main()

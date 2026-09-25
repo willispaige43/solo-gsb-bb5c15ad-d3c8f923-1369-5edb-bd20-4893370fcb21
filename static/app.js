@@ -898,3 +898,213 @@ patternInput.addEventListener('input', () => {
 });
 
 fillTrackSizeSelect();
+
+// ---------------------------------------------------------------------------
+// 多尺码对称花样排针
+// ---------------------------------------------------------------------------
+
+const layoutForm = document.getElementById('layout-form');
+const layoutGauge = document.getElementById('layout-gauge');
+const layoutEdge = document.getElementById('layout-edge');
+const layoutCenter = document.getElementById('layout-center');
+const layoutWidth = document.getElementById('layout-width');
+const layoutTolerance = document.getElementById('layout-tolerance');
+const layoutSizesList = document.getElementById('layout-sizes-list');
+const layoutMessage = document.getElementById('layout-message');
+const layoutResult = document.getElementById('layout-result');
+const layoutMeta = document.getElementById('layout-meta');
+const layoutTable = document.getElementById('layout-table');
+
+const LAYOUT_EXAMPLE = {
+  gauge: '20',
+  edge: '1',
+  center: '4',
+  pattern_width: '6',
+  tolerance: '1',
+  sizes: [
+    { name: 'S', target: '26.5' },
+    { name: 'M', target: '33' },
+    { name: 'L', target: '38.5' },
+  ],
+};
+
+function addLayoutSizeRow(name, target) {
+  const row = document.createElement('div');
+  row.className = 'size-row';
+
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.className = 'size-name';
+  nameInput.placeholder = '尺码名';
+  nameInput.value = name;
+  nameInput.required = true;
+
+  const targetInput = document.createElement('input');
+  targetInput.type = 'number';
+  targetInput.className = 'layout-target';
+  targetInput.min = '0';
+  targetInput.step = '0.1';
+  targetInput.placeholder = '目标片幅 cm';
+  targetInput.value = target;
+  targetInput.required = true;
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'remove-size';
+  removeBtn.textContent = '×';
+  removeBtn.title = '删除该尺码';
+  removeBtn.addEventListener('click', () => {
+    row.remove();
+    updateLayoutRowButtons();
+  });
+
+  row.appendChild(nameInput);
+  row.appendChild(targetInput);
+  row.appendChild(removeBtn);
+  layoutSizesList.appendChild(row);
+  updateLayoutRowButtons();
+}
+
+function updateLayoutRowButtons() {
+  const rows = layoutSizesList.querySelectorAll('.size-row');
+  rows.forEach((row) => {
+    row.querySelector('.remove-size').disabled = rows.length === 1;
+  });
+}
+
+function readLayoutSizes() {
+  return Array.from(layoutSizesList.querySelectorAll('.size-row')).map((row) => ({
+    name: row.querySelector('.size-name').value,
+    target: row.querySelector('.layout-target').value,
+  }));
+}
+
+function showLayoutMessage(text, ok) {
+  layoutMessage.textContent = text;
+  layoutMessage.className = 'move-message ' + (ok ? 'ok' : 'error');
+  layoutMessage.hidden = false;
+}
+
+function hideLayoutMessage() {
+  layoutMessage.hidden = true;
+  layoutMessage.textContent = '';
+}
+
+function fillLayoutExample() {
+  layoutGauge.value = LAYOUT_EXAMPLE.gauge;
+  layoutEdge.value = LAYOUT_EXAMPLE.edge;
+  layoutCenter.value = LAYOUT_EXAMPLE.center;
+  layoutWidth.value = LAYOUT_EXAMPLE.pattern_width;
+  layoutTolerance.value = LAYOUT_EXAMPLE.tolerance;
+  layoutSizesList.replaceChildren();
+  for (const s of LAYOUT_EXAMPLE.sizes) {
+    addLayoutSizeRow(s.name, s.target);
+  }
+  hideLayoutMessage();
+  layoutResult.hidden = true;
+}
+
+function buildLayoutTable(headers, rows) {
+  layoutTable.replaceChildren();
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  for (const label of headers) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  layoutTable.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  for (const cells of rows) {
+    const tr = document.createElement('tr');
+    for (const value of cells) {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  layoutTable.appendChild(tbody);
+}
+
+function renderLayout(data) {
+  layoutResult.hidden = false;
+
+  if (!data.ok) {
+    // 无可行组合：说明原因，并列出各尺码在允许宽差内的可行重复数范围
+    showLayoutMessage(data.error ? data.error.message : '无法同时满足约束', false);
+    if (Array.isArray(data.sizes) && data.sizes.length > 0) {
+      layoutMeta.textContent =
+        '各尺码在允许宽差内的可行单侧重复数范围如下，可据此调整目标片幅或允许宽差。';
+      buildLayoutTable(
+        ['尺码', '目标片幅(cm)', '可行单侧重复数'],
+        data.sizes.map((s) => [
+          s.name,
+          String(s.target),
+          s.min_repeats === null
+            ? '无（允许宽差内没有可用重复数）'
+            : s.min_repeats + ' ~ ' + s.max_repeats + ' 次',
+        ]));
+    } else {
+      layoutMeta.textContent = '';
+      layoutTable.replaceChildren();
+    }
+    return;
+  }
+
+  hideLayoutMessage();
+  layoutMeta.textContent =
+    '共 ' + data.sizes.length + ' 个尺码' +
+    '　｜　宽差绝对值之和 ' + data.total_deviation + ' cm' +
+    '　｜　起针数 = 2×' + data.edge + ' + ' + data.center +
+    ' + 2×' + data.pattern_width + '×单侧重复数' +
+    '　｜　实际片幅 = 起针数 ÷ ' + data.gauge + ' × 10 cm';
+  buildLayoutTable(
+    ['尺码', '目标片幅(cm)', '单侧重复数', '起针数(针)', '实际片幅(cm)', '偏差(cm)'],
+    data.sizes.map((s) => [
+      s.name,
+      String(s.target),
+      s.repeats + ' 次',
+      String(s.cast_on),
+      String(s.width),
+      String(s.deviation),
+    ]));
+}
+
+layoutForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  hideLayoutMessage();
+  layoutResult.hidden = true;
+
+  let data;
+  try {
+    const res = await fetch('/api/pattern-layout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        gauge: layoutGauge.value,
+        sizes: readLayoutSizes(),
+        edge: layoutEdge.value,
+        center: layoutCenter.value,
+        pattern_width: layoutWidth.value,
+        tolerance: layoutTolerance.value,
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    showLayoutMessage('排针请求失败：' + err.message, false);
+    return;
+  }
+  renderLayout(data);
+});
+
+document.getElementById('layout-add-size').addEventListener('click', () => {
+  addLayoutSizeRow('', '');
+  hideLayoutMessage();
+});
+document.getElementById('layout-fill-example').addEventListener('click', fillLayoutExample);
+
+// 初始填入示例，便于直接体验
+fillLayoutExample();
